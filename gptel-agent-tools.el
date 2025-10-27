@@ -1113,24 +1113,36 @@ Should include exactly what information the agent should return."))
  :include t)
 
 (defvar gptel-agent-request--handlers
-  `((WAIT ,#'gptel--handle-wait)
+  `((WAIT ,#'gptel-agent--indicate-wait
+          ,#'gptel--handle-wait)
     (TOOL ,#'gptel-agent--indicate-tool-call
-          ,#'gptel--handle-tool-use
-          ,#'gptel-agent--indicate-tool-result))
+          ,#'gptel--handle-tool-use))
   ";TODO: See `gptel-request--handlers'.")
 
-(defun gptel-agent--indicate-tool-result (fsm)
-  ";TODO: "
-  (plist-put (gptel-fsm-info fsm)
-             :tool-pending nil))
+(defun gptel-agent--indicate-wait (fsm)
+  (when-let* ((info (gptel-fsm-info fsm))
+              (info-ov (plist-get info :context))
+              (count (overlay-get info-ov 'count)))
+    (run-with-idle-timer
+     1.0 nil
+     (lambda (ov count)
+       (when (and (overlay-buffer ov)
+                  (eql (overlay-get ov 'count) count))
+         (let* ((task-msg (overlay-get ov 'msg))
+                (new-info-msg
+                 (concat task-msg
+                         (concat
+                          (propertize "Waiting... " 'face 'warning) "\n"
+                          (propertize "\n" 'face
+                                      '(:inherit shadow :underline t :extend t))))))
+           (overlay-put ov 'after-string new-info-msg))))
+     info-ov count)))
 
 (defun gptel-agent--indicate-tool-call (fsm)
   ";TODO: "
   (when-let* ((info (gptel-fsm-info fsm))
               (tool-use (plist-get info :tool-use))
               (ov (plist-get info :context)))
-    ;; Mark tool call pending
-    (plist-put info :tool-pending t)
     ;; Update overlay with tool calls
     (when (overlay-buffer ov)
       (let* ((task-msg (overlay-get ov 'msg))
@@ -1150,10 +1162,6 @@ Should include exactly what information the agent should return."))
         (overlay-put ov 'count (+ info-count (length tool-use)))
         (overlay-put ov 'after-string new-info-msg)))))
 
-;; (mapconcat (lambda (call)
-;;              (propertize (plist-get call :name) 'face 'bold))
-;;            tool-use (propertize "," 'face 'shadow))
-
 (defun gptel-agent--update-overlay (where &optional agent-type description)
   (let* ((bounds                  ;where to place the overlay, handle edge cases
           (save-excursion
@@ -1164,7 +1172,8 @@ Should include exactly what information the agent should return."))
               (cons (line-beginning-position) (line-end-position)))))
          (ov (make-overlay (car bounds) (cdr bounds) nil t))
          (msg (concat
-               "\n" (propertize "\n" 'face '(:inherit shadow :underline t :extend t))
+               (unless (eq (char-after (car bounds)) 10) "\n")
+               (propertize "\n" 'face '(:inherit shadow :underline t :extend t))
                (propertize (concat (capitalize agent-type) " Task: ")
                            'face 'font-lock-escape-face)
                (propertize description 'face 'font-lock-doc-face) "\n")))
@@ -1190,16 +1199,13 @@ PROMPT is the detailed prompt instructing the agent on what is required."
   (gptel-with-preset
       (nconc (list :include-reasoning nil
                    :use-tools t
-                   :use-context nil
-                   :backend "ChatGPT"
-                   :model 'gpt-4.1-mini)
+                   :use-context nil)
              (cdr (assoc agent-type gptel--agents)))
     (let* ((info (gptel-fsm-info gptel--fsm-last))
            (where (or (plist-get info :tracking-marker)
                       (plist-get info :position)))
            (partial (format "%s result for task: %s\n\n"
                             (capitalize agent-type) description)))
-      ;; (unless (= (point-max) where) (cl-incf where))
       (gptel--update-status " Calling Agent..." 'font-lock-escape-face)
       (gptel-request prompt
         :context (gptel-agent--update-overlay where agent-type description)
@@ -1221,11 +1227,17 @@ Error details: %S"
                (gptel--display-tool-calls calls info))
               ((pred stringp)
                (setq partial (concat partial resp))
-               (unless (plist-get info :tool-pending)
+               ;; If tool use is pending, the agent isn't done, so we just
+               ;; accumulate output without printing it.  We print at the end.
+               (unless (plist-get info :tool-use)
                  (delete-overlay ov)
                  (when-let* ((transformer (plist-get info :transformer)))
                    (setq partial (funcall transformer partial)))
                  (funcall main-cb partial))))))))))
+
+
+(provide 'gptel-agent-tools)
+;;; gptel-agent-tools.el ends here
 
 ;; (pcase-dolist (`(,tool ,args ,cb) calls)
 ;;   (if (gptel-tool-async tool)
@@ -1236,8 +1248,24 @@ Error details: %S"
 ;;              (error (mapconcat #'gptel--to-string errdata " ")))))
 ;;       (funcall cb result))))
 
-(provide 'gptel-agent-tools)
-;;; gptel-agent-tools.el ends here
+;; :backend "ClaudeOauth"
+;; :model 'claude-sonnet-4-5-20250929
+
+;; (mapconcat (lambda (call)
+;;              (propertize (plist-get call :name) 'face 'bold))
+;;            tool-use (propertize "," 'face 'shadow))
+
+;; (with-current-buffer (get-buffer "*scratch*")
+;;   (goto-char (point-max))
+;;   (print (format "\nTool pending at start: %S" (plist-get info :tool-pending))
+;;          (get-buffer "*scratch*"))
+;;   (print (format "Callback called with resp:\n\n%S\n----\n"
+;;                  (if (consp resp) (ignore-errors
+;;                                     (mapcar (lambda (c) (gptel-tool-name (car c)))
+;;                                             resp))
+;;                    resp))
+;;          (get-buffer "*scratch*")))
+
 
 ;; Local Variables:
 ;; elisp-flymake-byte-compile-load-path: ("~/.local/share/git/elpaca/repos/gptel/" "~/.local/share/git/elpaca/repos/transient/lisp" "~/.local/share/git/elpaca/repos/compat/")

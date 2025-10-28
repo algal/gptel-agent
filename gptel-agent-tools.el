@@ -50,7 +50,6 @@
 
 (require 'gptel)
 (require 'eww)
-(require 'flymake)
 (require 'url-http)
 (eval-when-compile (require 'cl-lib))
 
@@ -61,6 +60,7 @@
  :name "execute_bash"
  :function (lambda (command)
              "Execute a bash command and return its output.
+
 COMMAND is the bash command string to execute."
              (with-temp-buffer
                (let* ((exit-code (call-process "bash" nil (current-buffer) nil "-c" command))
@@ -68,40 +68,34 @@ COMMAND is the bash command string to execute."
                  (if (zerop exit-code)
                      output
                    (format "Command failed with exit code %d:\nSTDOUT+STDERR:\n%s" exit-code output)))))
- :description "Execute Bash commands to inspect files and system state.
+ :description "Execute Bash commands.
 
-This tool provides access to a Bash shell with GNU coreutils (or equivalents)
-available. You can use any standard Linux commands including: cd, ls, file, cat,
-grep, awk, sed, head, tail, wc, find, sort, uniq, cut, tr, and more.
+This tool provides access to a Bash shell with GNU coreutils (or equivalents) available.
+Use this to inspect system state, run builds, tests or other development or system administration tasks.
 
-PURPOSE:
-- Efficiently inspect files and system state WITHOUT consuming excessive
-tokens. This is preferred over reading entire large files.
+Do NOT use this for file operations, finding, reading or editing files.
+Use the provided file tools instead: `read_file_lines`, `write_file`, `edit_files`, \
+`glob_files`, `grep_files`
+
+- Quote file paths with spaces using double quotes.
+- Chain dependent commands with && (or ; if failures are OK)
+- Use absolute paths instead of cd when possible
+- For parallel commands, make multiple `execute_bash` calls in one message
 - Run tests, check your work or otherwise close the loop to verify changes you make.
-- Modify files or system state as appropriate, using cp, mv, rm, patch,
-git subcommands (git log, commit, branch and more) and so on.
-
-BEST PRACTICES:
-- Use pipes to combine commands: 'cat file.log | grep ERROR | tail -20'
-- For large files, use head/tail: 'head -50 file.txt' or 'tail -100 file.log'
-- Use grep with context: 'grep -A 5 -B 5 pattern file.txt'
-- Check file sizes first: 'wc -l file.txt' before reading
-- Use file command to identify file types: 'file *'
-- Combine with other tools: 'find . -name \"*.el\" | head -10'
 
 EXAMPLES:
 - List files with details: 'ls -lah /path/to/dir'
-- Print lines 25-35 of a long file/stream: 'sed -n \"25,35p\" app.log'
 - Find recent errors: 'grep -i error /var/log/app.log | tail -20'
 - Check file type: 'file document.pdf'
 - Count lines: 'wc -l *.txt'
-- Search with context: 'grep -A 3 \"function foo\" script.sh'
 
-The command will be executed in the current working directory. Output is
-returned as a string. Long outputs should be filtered/limited using pipes."
- :args '((:name "command"
-          :type string
-          :description "The Bash command to execute. Can include pipes and standard shell operators. Example: 'ls -la | head -20' or 'grep -i error app.log | tail -50'"))
+The command will be executed in the current working directory.  Output is
+returned as a string.  Long outputs should be filtered/limited using pipes."
+ :args '(( :name "command"
+           :type string
+           :description "The Bash command to execute.  \
+Can include pipes and standard shell operators.
+Example: 'ls -la | head -20' or 'grep -i error app.log | tail -50'"))
  :confirm t
  :include t
  :category "system")
@@ -137,18 +131,36 @@ returned as a string. Long outputs should be filtered/limited using pipes."
 ;; The command will be executed in the current working directory. Output is
 ;; returned as a string. Long outputs should be filtered/limited using pipes."
 
+;; - Can run commands in background with `run_in_background: true`
+;; - Default timeout is 2 minutes (120000ms), max is 10 minutes
+
 ;;; Web tools
 
 ;;;; Web search
-(defun my/gptel-brave-search (callback query &optional count)
+(defvar gptel-agent-brave-key #'gptel-agent-brave-key-auth-source
+  "API key for Brave web search.
+
+Can be a string (the key) or a function that returns the string.")
+
+(defun gptel-agent-brave-key-auth-source ()
+  "Lookup API key for Brave web search from auth source.
+
+Expects the host and user to be \"api.search.brave.com\" and \"search\"
+respectively."
+  (let ((message-log-max nil)
+        (inhibit-message t)
+        (secret (plist-get (car (auth-source-search
+                                 :host "api.search.brave.com"
+                                 :user "search"
+                                 :require '(:secret)))
+                           :secret)))
+    (if (functionp secret) (funcall secret) secret)))
+
+(defun gptel-agent--brave-web-search (cb query &optional count)
   "Return a JSON array of COUNT web search results for QUERY.
 
-CALLBACK is called on the result."
+Callback CB is called with the result."
   (let* ((brave-url "https://api.search.brave.com/res/v1/web/search")
-         (brave-api-key
-          (lambda () (let ((message-log-max nil)
-                      (inhibit-message t))
-                  (auth-source-pass-get 'secret "api/api.search.brave.com/search"))))
          (brave-url-string
           (lambda (q) (concat brave-url "?"
                          (url-build-query-string
@@ -157,19 +169,23 @@ CALLBACK is called on the result."
                             ("page" ,(format "%s" 0)))))))
          (url-request-method "GET")
          (url-request-extra-headers
-          `(("User-Agent" . "Emacs:consult-web/0.1 (Emacs consult-web package; https://github.com/armindarvish/consult-web)")
+          `(("User-Agent" . "Emacs:gptel-agent/0.1")
             ("Accept" . "application/json")
             ("Accept-Encoding" . "gzip")
-            ("X-Subscription-Token" . ,(let ((key brave-api-key))
-                                         (if (functionp key) (funcall key) key))))))
+            ("X-Subscription-Token" . ,(if (functionp gptel-agent-brave-key)
+                                           (funcall gptel-agent-brave-key)
+                                         gptel-agent-brave-key))))
+         (timeout 30) timer done)
     (url-retrieve
      (funcall brave-url-string query)
      (lambda (_)
+       (setq done t)
+       (when timer (cancel-timer timer))
        (goto-char url-http-end-of-headers)
        (condition-case nil
            (let ((attrs (json-parse-buffer :object-type 'plist)))
              (if-let* ((err (plist-get attrs :error)))
-                 (funcall callback (list :error err :type (plist-get attrs :type)))
+                 (funcall cb (list :error err :type (plist-get attrs :type)))
                (let* ((raw-results (map-nested-elt attrs '(:web :results)))
                       (annotated-results
                        (vconcat
@@ -180,71 +196,65 @@ CALLBACK is called on the result."
                                   (desc (map-elt item :description)))
                              (list :url url :title title :description desc)))
                          raw-results))))
-                 (funcall callback annotated-results))))
-         (error (funcall callback (list :type "parse error"
-                                        :error "Could not parse API response")))))
-     nil 'silent)))
-
+                 (funcall cb annotated-results))))
+         (error (funcall cb (list :type "parse error"
+                                  :error "Could not parse API response")))))
+     nil 'silent)
+    (setq timer
+          (run-at-time
+           timeout nil
+           (lambda ()
+             (unless done
+               (setq done t)
+               (funcall cb (format "Error: Web search for %s timed out after %d seconds."
+                                   query timeout))))))))
 (gptel-make-tool
  :name "search_web"
- :function 'my/gptel-brave-search
+ :function 'gptel-agent--brave-web-search
  :description "Search the web for the first five results to a query.  The query can be an arbitrary string.  Returns the top five results from the search engine as a plist of objects.  Each object has the keys `:url`, `:title` and `:description` for the corresponding search result.
+
+The search request times out after 30 seconds.
 
 If required, consider using the url as the input to the `read_url` tool to get the contents of the url.  Note that this might not work as the `read_url` tool does not handle javascript-enabled pages."
  :args `((:name "query" :type string :description "The natural language search query, can be multiple words."))
  :async t
  :category "web")
-;; Search the web with brave, top 5 results with links:1 ends here
 
 ;;;; Read URLs
-(list
- :function (lambda (url)
-             (with-current-buffer (url-retrieve-synchronously url)
-               (goto-char (point-min)) (forward-paragraph)
-               (let ((dom (libxml-parse-html-region (point) (point-max))))
-                 (run-at-time 0 nil #'kill-buffer (current-buffer))
-                 (with-temp-buffer
-                   (eww-score-readability dom)
-                   (shr-insert-document (eww-highest-readability dom))
-                   (buffer-substring-no-properties (point-min) (point-max))))))
- :name "read_url_sync"
- :description "Fetch and read the contents of a URL"
- :args (list '(:name "url"
-                     :type "string"
-                     :description "The URL to read"))
- :category "web")
+(defun gptel-agent--read-url (cb url)
+  "Fetch URL text and call CB with it."
+  (let (timer done (timeout 30))
+    (url-retrieve
+     url
+     (lambda (status)
+       (setq done t)
+       (when timer (cancel-timer timer))
+       (if (plist-get status :error)
+           (funcall cb (format "Error: Request failed with data:\n%S"
+                               (plist-get status :error)))
+         (goto-char (point-min)) (forward-paragraph)
+         (condition-case errdata
+             (let ((dom (libxml-parse-html-region (point) (point-max)))
+                   (url-buffer (current-buffer)))
+               (run-at-time 0 nil #'kill-buffer url-buffer)
+               (with-temp-buffer
+                 (eww-score-readability dom)
+                 (shr-insert-document (eww-highest-readability dom))
+                 (funcall
+                  cb (buffer-substring-no-properties
+                      (point-min) (point-max)))))
+           (error (funcall cb (format "Error: Request failed with error data:\n%S"
+                                      errdata)))))))
+    (setq timer
+          (run-at-time
+           timeout nil
+           (lambda () (unless done
+                   (setq done t)
+                   (funcall cb (format "Error: Request to %s timed out after %d seconds."
+                                       url timeout))))))))
 
 (gptel-make-tool
- :function (lambda (cb url)
-             (let ((timer nil) (finished nil) (timeout 30)) ; Set timeout to 30 seconds
-               (url-retrieve
-                url
-                (lambda (status)
-                  (setq finished t)
-                  (when timer (cancel-timer timer))
-                  (if (plist-get status :error)
-                      (funcall cb (format "Error: Request failed with data:\n%S"
-                                          (plist-get status :error)))
-                    (goto-char (point-min)) (forward-paragraph)
-                    (condition-case errdata
-                        (let ((dom (libxml-parse-html-region (point) (point-max)))
-                              (url-buffer (current-buffer)))
-                          (run-at-time 0 nil #'kill-buffer url-buffer)
-                          (with-temp-buffer
-                            (eww-score-readability dom)
-                            (shr-insert-document (eww-highest-readability dom))
-                            (funcall
-                             cb (buffer-substring-no-properties
-                                 (point-min) (point-max)))))
-                      (error (funcall cb (format "Error: Request failed with error data:\n%S"
-                                                 errdata)))))))
-               (setq timer
-                     (run-at-time
-                      timeout nil
-                      (lambda () (unless finished
-                              (setq finished t)
-                              (funcall cb (format "Error: Request to %s timed out after %d seconds."
-                                                  url timeout))))))))
+ :function #'gptel-agent--read-url
  :name "read_url"
  :description "Fetch and read the contents of a URL.
 
@@ -255,383 +265,293 @@ If required, consider using the url as the input to the `read_url` tool to get t
            :description "The URL to read"))
  :async t
  :include t
- :confirm t
  :category "web")
- ;; Read a non-js webpage with eww:1 ends here
 
 ;;;; Fetch youtube transcript
- (gptel-make-tool
-  :name "read_youtube_url"
-  :function #'my/gptel-agent-tool--read-youtube-url
-  :description "Find the description and video transcript for a youtube video.  Returns a markdown formatted string containing two sections:
+(gptel-make-tool
+ :name "read_youtube_url"
+ :function #'gptel-agent--yt-read-url
+ :description "Find the description and video transcript for a youtube video.  Returns a markdown formatted string containing two sections:
 
 \"description\": The video description added by the uploader
 \"transcript\": The video transcript in SRT format"
-  :args '((:name "url"
-                 :description "The youtube video URL, for example \"https://www.youtube.com/watch?v=H2qJRnV8ZGA\""
-                 :type "string"))
-  :category "web"
-  :async t
-  :include t)
+ :args '((:name "url"
+                :description "The youtube video URL, for example \"https://www.youtube.com/watch?v=H2qJRnV8ZGA\""
+                :type "string"))
+ :category "web"
+ :async t
+ :include t)
 
- (defun my/yt--parse-caption-xml (xml-string)
-   "Parse YouTube caption XML and return DOM structure."
-   (with-temp-buffer
-     (insert xml-string)
-     (goto-char (point-min))
-     ;; Clean up the XML
-     (dolist (reps '(("\n" . " ")
-                     ("&amp;" . "&")
-                     ("&quot;" . "\"")
-                     ("&#39;" . "'")
-                     ("&lt;" . "<")
-                     ("&gt;" . ">")))
-       (save-excursion
-         (while (search-forward (car reps) nil t)
-           (replace-match (cdr reps) nil t))))
-     (libxml-parse-xml-region (point-min) (point-max))))
+(defun gptel-agent--yt-parse-captions (xml-string)
+  "Parse YouTube caption XML-STRING and return DOM."
+  (with-temp-buffer
+    (insert xml-string)
+    (goto-char (point-min))
+    ;; Clean up the XML
+    (dolist (reps '(("\n" . " ")
+                    ("&amp;" . "&")
+                    ("&quot;" . "\"")
+                    ("&#39;" . "'")
+                    ("&lt;" . "<")
+                    ("&gt;" . ">")))
+      (save-excursion
+        (while (search-forward (car reps) nil t)
+          (replace-match (cdr reps) nil t))))
+    (libxml-parse-xml-region (point-min) (point-max))))
 
- (defun my/yt--format-timestamp (seconds)
-   "Format SECONDS as MM:SS timestamp."
-   (format "%d:%02d" (floor seconds 60) (mod seconds 60)))
+(defun gptel-agent--yt-format-captions (caption-dom &optional chunk-time)
+  "Format CAPTION-DOM as paragraphs with timestamps.
 
- (defun my/yt--format-captions-as-paragraphs (caption-dom &optional chunk-time)
-   "Format caption DOM as paragraphs with timestamps.
 CHUNK-TIME is the number of seconds per paragraph (default 30)."
-   (when (and (listp caption-dom)
-              (eq (car-safe caption-dom) 'transcript))
-     (let ((chunk-time (or chunk-time 30))
-           (result "")
-           (current-para "")
-           (para-start-time 0))
-       (dolist (elem (cddr caption-dom)) ;; Process each text element
-         (when (and (listp elem) (eq (car elem) 'text))
-           (let* ((attrs (cadr elem))
-                  (text (caddr elem))
-                  (start (string-to-number (cdr (assoc 'start attrs))))
-                  ;; Check if we've crossed into a new chunk-time boundary
-                  (should-chunk (and (> (abs (- start para-start-time)) 3)
-                                     (not (= (floor para-start-time chunk-time)
-                                             (floor start chunk-time))))))
-             (when (and should-chunk (> (length current-para) 0))
-               ;; Add completed paragraph
-               (setq result (concat result
-                                    (format "[%s]\n%s\n\n"
-                                            (my/yt--format-timestamp para-start-time)
-                                            (string-trim current-para))))
-               (setq current-para "")
-               (setq para-start-time start))
+  (when (and (listp caption-dom)
+             (eq (car-safe caption-dom) 'transcript))
+    (let ((chunk-time (or chunk-time 30))
+          (result "")
+          (current-para "")
+          (para-start-time 0))
+      (dolist (elem (cddr caption-dom)) ;; Process each text element
+        (when (and (listp elem) (eq (car elem) 'text))
+          (let* ((attrs (cadr elem))
+                 (text (caddr elem))
+                 (start (string-to-number (cdr (assoc 'start attrs))))
+                 ;; Check if we've crossed into a new chunk-time boundary
+                 (should-chunk (and (> (abs (- start para-start-time)) 3)
+                                    (not (= (floor para-start-time chunk-time)
+                                            (floor start chunk-time))))))
+            (when (and should-chunk (> (length current-para) 0))
+              ;; Add completed paragraph
+              (setq result (concat result
+                                   (format "[%d:%02d]\n%s\n\n"
+                                           (floor para-start-time 60)
+                                           (mod para-start-time 60)
+                                           (string-trim current-para))))
+              (setq current-para "")
+              (setq para-start-time start))
 
-             (when text
-               (setq current-para (concat current-para " " text))))))
+            (when text
+              (setq current-para (concat current-para " " text))))))
 
-       ;; Add final paragraph
-       (when (> (length current-para) 0)
-         (setq result (concat result
-                              (format "[%s]\n%s\n\n"
-                                      (my/yt--format-timestamp para-start-time)
-                                      (string-trim current-para)))))
-       result)))
+      ;; Add final paragraph
+      (when (> (length current-para) 0)
+        (setq result (concat result
+                             (format "[%d:%02d]\n%s\n\n"
+                                     (floor para-start-time 60)
+                                     (mod para-start-time 60)
+                                     (string-trim current-para)))))
+      result)))
 
- (defun my/yt--fetch-watch-page (callback video-id)
-   "Step 1: Fetch YouTube watch page and extract INNERTUBE_API_KEY.
-Calls CALLBACK with error or proceeds to fetch InnerTube data."
-   (url-retrieve
-    (format "https://youtube.com/watch?v=%s" video-id)
-    (lambda (status callback video-id)
-      (if-let ((error (plist-get status :error)))
-          (funcall callback (format "Error fetching page: %s" error))
-        (goto-char (point-min))
-        (search-forward "\n\n" nil t)
-        (let* ((html (buffer-substring (point) (point-max)))
-               (api-key (and (string-match
-                              "\"INNERTUBE_API_KEY\":\"\\([a-zA-Z0-9_-]+\\)"
-                              html)
-                             (match-string 1 html))))
-          (if api-key
-              (my/yt--fetch-innertube callback video-id api-key)
-            (funcall callback "Error: Could not extract API key")))))
-    (list callback video-id)))
+(defun gptel-agent--yt-fetch-watch-page (callback video-id)
+  "Step 1: Fetch YouTube watch page for VIDEO-ID.
 
- (defun my/yt--fetch-innertube (callback video-id api-key)
-   "Step 2: Fetch video metadata from YouTube InnerTube API.
-Calls CALLBACK with error or proceeds to fetch captions."
-   (let ((url-request-method "POST")
-         (url-request-extra-headers
-          '(("Content-Type" . "application/json")
-            ("Accept-Language" . "en-US")))
-         (url-request-data
-          (encode-coding-string
-           (json-encode
-            `((context . ((client . ((clientName . "ANDROID")
-                                     (clientVersion . "20.10.38")))))
-              (videoId . ,video-id)))
-           'utf-8)))
-     (url-retrieve
-      (format "https://www.youtube.com/youtubei/v1/player?key=%s" api-key)
-      (lambda (status callback)
-        (if-let ((error (plist-get status :error)))
-            (funcall callback (format "Error fetching metadata: %s" error))
-          (goto-char (point-min))
-          (search-forward "\n\n" nil t)
-          (let* ((json-data (ignore-errors
-                              (json-parse-buffer :object-type 'plist)))
-                 (video-details (plist-get json-data :videoDetails))
-                 (description (plist-get video-details :shortDescription))
-                 (caption-tracks (map-nested-elt
-                                  json-data
-                                  '(:captions
-                                    :playerCaptionsTracklistRenderer
-                                    :captionTracks))))
-            (my/yt--fetch-captions callback description caption-tracks))))
-      (list callback))))
+Call CALLBACK with error or proceeds to fetch InnerTube data."
+  (url-retrieve
+   (format "https://youtube.com/watch?v=%s" video-id)
+   (lambda (status callback video-id)
+     (if-let ((error (plist-get status :error)))
+         (funcall callback (format "Error fetching page: %s" error))
+       (goto-char (point-min))
+       (search-forward "\n\n" nil t)
+       (let* ((html (buffer-substring (point) (point-max)))
+              (api-key (and (string-match
+                             "\"INNERTUBE_API_KEY\":\"\\([a-zA-Z0-9_-]+\\)"
+                             html)
+                            (match-string 1 html))))
+         (if api-key
+             (gptel-agent--yt--fetch-innertube callback video-id api-key)
+           (funcall callback "Error: Could not extract API key")))))
+   (list callback video-id)))
 
- (defun my/yt--fetch-captions (callback description caption-tracks)
-   "Step 3: Find and fetch English captions.
-Calls CALLBACK with formatted result containing description and transcript."
-   (if (not caption-tracks)
-       (funcall callback
-                (format "# Description\n\n%s\n\n# Transcript\n\nNo transcript available."
-                        (or description "No description available.")))
-     (let ((en-caption
-            (cl-find-if
-             (lambda (track)
-               (string-match-p "^en" (or (plist-get track :languageCode) "")))
-             caption-tracks)))
-       (if (not en-caption)
-           (funcall callback
-                    (format "# Description\n\n%s\n\n# Transcript\n\nNo English transcript available."
-                            (or description "No description available.")))
-         (let ((base-url (replace-regexp-in-string
-                          "&fmt=srv3" ""
-                          (plist-get en-caption :baseUrl))))
-           (url-retrieve
-            base-url
-            (lambda (status callback description)
-              (if-let ((error (plist-get status :error)))
-                  (funcall callback
-                           (format "# Description\n\n%s\n\n# Transcript\n\nError fetching transcript: %s"
-                                   (or description "No description available.")
-                                   error))
-                (goto-char (point-min))
-                (search-forward "\n\n" nil t)
-                (let* ((xml-string (buffer-substring (point) (point-max)))
-                       (caption-dom (my/yt--parse-caption-xml xml-string))
-                       (formatted-transcript
-                        (my/yt--format-captions-as-paragraphs caption-dom 30)))
-                  (funcall callback
-                           (format "# Description\n\n%s\n\n# Transcript\n\n%s"
-                                   (or description "No description available.")
-                                   (or formatted-transcript "Error parsing transcript."))))))
-            (list callback description)))))))
+(defun gptel-agent--yt--fetch-innertube (callback video-id api-key)
+  "Step 2: Fetch VIDEO-ID metadata from YouTube InnerTube API.
 
- (defun my/gptel-agent-tool--read-youtube-url (callback url)
-   "Fetch YouTube metadata and transcript for URL, calling CALLBACK with result.
+Call CALLBACK with error or proceeds to fetch captions."
+  (let ((url-request-method "POST")
+        (url-request-extra-headers
+         '(("Content-Type" . "application/json")
+           ("Accept-Language" . "en-US")))
+        (url-request-data
+         (encode-coding-string
+          (json-encode
+           `((context . ((client . ((clientName . "ANDROID")
+                                    (clientVersion . "20.10.38")))))
+             (videoId . ,video-id)))
+          'utf-8)))
+    (url-retrieve
+     (format "https://www.youtube.com/youtubei/v1/player?key=%s" api-key)
+     (lambda (status callback)
+       (if-let ((error (plist-get status :error)))
+           (funcall callback (format "Error fetching metadata: %s" error))
+         (goto-char (point-min))
+         (search-forward "\n\n" nil t)
+         (let* ((json-data (ignore-errors
+                             (json-parse-buffer :object-type 'plist)))
+                (video-details (plist-get json-data :videoDetails))
+                (description (plist-get video-details :shortDescription))
+                (caption-tracks (map-nested-elt
+                                 json-data
+                                 '(:captions
+                                   :playerCaptionsTracklistRenderer
+                                   :captionTracks))))
+           (gptel-agent--yt-fetch-captions callback description caption-tracks))))
+     (list callback))))
+
+(defun gptel-agent--yt-fetch-captions (callback description caption-tracks)
+  "Step 3: Find and fetch English captions for CAPTION-TRACKS.
+
+Call CALLBACK with formatted result containing DESCRIPTION and transcript."
+  (if (not caption-tracks)
+      (funcall callback
+               (format "# Description\n\n%s\n\n# Transcript\n\nNo transcript available."
+                       (or description "No description available.")))
+    (let ((en-caption
+           (cl-find-if
+            (lambda (track)
+              (string-match-p "^en" (or (plist-get track :languageCode) "")))
+            caption-tracks)))
+      (if (not en-caption)
+          (funcall callback
+                   (format "# Description\n\n%s\n\n# Transcript\n\nNo English transcript available."
+                           (or description "No description available.")))
+        (let ((base-url (replace-regexp-in-string
+                         "&fmt=srv3" ""
+                         (plist-get en-caption :baseUrl))))
+          (url-retrieve
+           base-url
+           (lambda (status callback description)
+             (if-let ((error (plist-get status :error)))
+                 (funcall callback
+                          (format "# Description\n\n%s\n\n# Transcript\n\nError fetching transcript: %s"
+                                  (or description "No description available.")
+                                  error))
+               (goto-char (point-min))
+               (search-forward "\n\n" nil t)
+               (let* ((xml-string (buffer-substring (point) (point-max)))
+                      (caption-dom (gptel-agent--yt-parse-captions xml-string))
+                      (formatted-transcript
+                       (gptel-agent--yt-format-captions caption-dom 30)))
+                 (funcall callback
+                          (format "# Description\n\n%s\n\n# Transcript\n\n%s"
+                                  (or description "No description available.")
+                                  (or formatted-transcript "Error parsing transcript."))))))
+           (list callback description)))))))
+
+(defun gptel-agent--yt-read-url (callback url)
+  "Fetch YouTube metadata and transcript for URL, calling CALLBACK with result.
 CALLBACK is called with a markdown-formatted string containing the video
 description and transcript formatted as timestamped paragraphs."
-   (if-let* ((video-id
-              (and (string-match
-                    (rx bol (opt "http" (opt "s") "://")
-                        (opt "www.") "youtu" (or ".be" "be.com") "/"
-                        (opt "watch?v=")
-                        (group (one-or-more (not (any "?&")))))
-                    url)
-                   (match-string 1 url))))
-       (my/yt--fetch-watch-page callback video-id)
-     (funcall callback "Error: Invalid YouTube URL")))
+  (if-let* ((video-id
+             (and (string-match
+                   (rx bol (opt "http" (opt "s") "://")
+                       (opt "www.") "youtu" (or ".be" "be.com") "/"
+                       (opt "watch?v=")
+                       (group (one-or-more (not (any "?&")))))
+                   url)
+                  (match-string 1 url))))
+      (gptel-agent--yt-fetch-watch-page callback video-id)
+    (funcall callback "Error: Invalid YouTube URL")))
 
-;;; Emacs tools
- (gptel-make-tool
-  :function (lambda (buffer text)
-              (with-current-buffer (get-buffer-create buffer)
-                (save-excursion
-                  (goto-char (point-max))
-                  (insert text)))
-              (format "Appended text to buffer %s" buffer))
-  :name "append_to_buffer"
-  :description "Append text to the an Emacs buffer.  If the buffer does not exist, it will be created."
-  :args (list '(:name "buffer"
-                      :type "string"
-                      :description "The name of the buffer to append text to.")
-              '(:name "text"
-                      :type "string"
-                      :description "The text to append to the buffer."))
-  :category "emacs")
+;;; Code tools
+;;;; Diagnostics from flymake
+(declare-function flymake--project-diagnostics "flymake")
+(declare-function flymake--diag-beg "flymake")
+(declare-function flymake--diag-type "flymake")
+(declare-function flymake--diag-text "flymake")
+(declare-function flymake-diagnostic-buffer "flymake")
 
- (gptel-make-tool
-  :function (lambda (filename)
-              (find-file-other-window filename)
-              (format "Opened file or directory %s" filename))
-  :name "open_file_or_dir"
-  :description "Open a file or directory in this Emacs session."
-  :args (list '(:name "file"
-                      :type "string"
-                      :description "The file or directory to open in the Emacs session."))
-  :category "emacs")
-
- ;; buffer retrieval tool
- (gptel-make-tool
-  :function (lambda (buffer)
-              (unless (buffer-live-p (get-buffer buffer))
-                (error "Error: buffer %s is not live" buffer))
-              (with-current-buffer  buffer
-                (buffer-substring-no-properties (point-min) (point-max))))
-  :name "read_buffer"
-  :description "return the contents of an emacs buffer"
-  :args (list '(:name "buffer"
-                      :type "string"
-                      :description "the name of the buffer whose contents are to be retrieved"))
-  :category "emacs")
-
- (gptel-make-tool
-  :function (lambda (buffer start-line end-line)
-              "Extract a line range from a buffer"
-              (unless (get-buffer buffer)
-                (error "Error: buffer %s is not live" buffer))
-              (with-current-buffer buffer
-                (let ((start (line-beginning-position start-line))
-                      (end (line-end-position end-line)))
-                  (buffer-substring-no-properties start end))))
-  :name "read_buffer_lines"
-  :description "extract a line range from a buffer"
-  :args (list '(:name "buffer" :type "string" :description "the name of the buffer")
-              '(:name "start_line" :type "integer" :description "the line to start reading from")
-              '(:name "end_line" :type "integer" :description "the line up to which to read"))
-  :confirm (lambda (_ start end) (> (- end start) 100))
-  :category "emacs")
-
- (defun gptel--tool-flymake-diagnostics ()
-   "Collect all flymake errors across all open buffers in the current project.
+(defun gptel--tool-flymake-diagnostics ()
+  "Collect all flymake errors across all open buffers in the current project.
 
 Errors with low severity are not collected."
-   (let ((project (project-current)))
-     (unless project
-       (error "Not in a project.  Cannot collect flymake diagnostics"))
-     (let ((results '()))
-       (dolist (diag (flymake--project-diagnostics project))
-         (let ((severity (flymake--diag-type diag)))
-           (when (memq severity '(:error :warning))
-             (with-current-buffer (flymake-diagnostic-buffer diag)
-               (let* ((beg (flymake--diag-beg diag))
-                      (line-num (line-number-at-pos beg))
-                      (line-text (buffer-substring-no-properties
-                                  (line-beginning-position) (line-end-position))))
-                 (push (format "File: %s:%d\nSeverity: %s\nMessage: %s\n---\n%s"
-                               (buffer-file-name)
-                               line-num
-                               severity
-                               (flymake--diag-text diag)
-                               line-text)
-                       results))))))
-       (string-join (nreverse results) "\n\n"))))
+  (let ((project (project-current)))
+    (unless project
+      (error "Not in a project.  Cannot collect flymake diagnostics"))
+    (require 'flymake)
+    (let ((results '()))
+      (dolist (diag (flymake--project-diagnostics project))
+        (let ((severity (flymake--diag-type diag)))
+          (when (memq severity '(:error :warning))
+            (with-current-buffer (flymake-diagnostic-buffer diag)
+              (let* ((beg (flymake--diag-beg diag))
+                     (line-num (line-number-at-pos beg))
+                     (line-text (buffer-substring-no-properties
+                                 (line-beginning-position) (line-end-position))))
+                (push (format "File: %s:%d\nSeverity: %s\nMessage: %s\n---\n%s"
+                              (buffer-file-name)
+                              line-num
+                              severity
+                              (flymake--diag-text diag)
+                              line-text)
+                      results))))))
+      (string-join (nreverse results) "\n\n"))))
 
- (gptel-make-tool
-  :name "code_diagnostics"
-  :description "Collect all code diagnostics with severity high/medium across all open buffers in the current project."
-  :function #'gptel--tool-flymake-diagnostics
-  :args nil
-  :category "code"
-  :include t
-  :confirm t)
-
- (defun modify-buffer-apply-diff (buffer diff)
-   "Apply unified format DIFF to BUFFER."
-   (message "Applying diff %s to buffer %s" diff buffer)
-   (if-let ((buf (get-buffer buffer)))
-       (with-current-buffer buf
-         ;; Find the first @@ and ignore everything before it
-         (if-let ((first-hunk-pos (string-match "^@@ .*@@\n" diff)))
-             (dolist (hunk (split-string (substring diff first-hunk-pos) "^@@ .*@@\n" t))
-               (let (before after)
-                 (dolist (line (split-string hunk "\n" t))
-                   (cond
-                    ((string-prefix-p " " line)
-                     (push (substring line 1) before)
-                     (push (substring line 1) after))
-                    ((string-prefix-p "-" line)
-                     (push (substring line 1) before))
-                    ((string-prefix-p "+" line)
-                     (push (substring line 1) after))))
-                 (setq before (string-join (nreverse before) "\n")
-                       after (string-join (nreverse after) "\n"))
-                 (goto-char (point-min))
-                 (if (search-forward before nil t)
-                     (replace-match after)
-                   (message "Hunk not found in buffer %s" buffer))))
-           (message "No hunks found in diff"))
-         (format "Applied changes to buffer %s" buffer))
-     (error "Buffer %s not found" buffer)))
-
- (gptel-make-tool
-  :name "modify_buffer"
-  :description "Modify buffer contents using unified diff format"
-  :args (list '(:name "buffer"
-                      :type "string"
-                      :description "The name of the buffer to modify")
-              '(:name "diff"
-                      :type "string"
-                      :description "The changes to apply in unified diff format (with @@ hunks and +/- lines)"))
-  :category "emacs"
-  :function #'modify-buffer-apply-diff)
+(gptel-make-tool
+ :name "code_diagnostics"
+ :description "Collect all code diagnostics with severity high/medium \
+across all open buffers in the current project."
+ :function #'gptel--tool-flymake-diagnostics
+ :args nil
+ :category "code"
+ :include t
+ :confirm t)
 
 ;;; Filesystem tools
 ;;;; Make directories
- (gptel-make-tool
-  :name "make_directory"
-  :description "Create a new directory with the given name in the specified parent directory"
-  :function (lambda (parent name)
-              (condition-case nil
-                  (progn
-                    (make-directory (expand-file-name name parent) t)
-                    (format "Directory %s created/verified in %s" name parent))
-                (error (format "Error creating directory %s in %s" name parent))))
-  :args (list '( :name "parent"
-                 :type "string"
-                 :description "The parent directory where the new directory should be created, e.g. /tmp")
-              '( :name "name"
-                 :type "string"
-                 :description "The name of the new directory to create, e.g. testdir"))
-  :category "filesystem"
-  :confirm t)
+(gptel-make-tool
+ :name "make_directory"
+ :description "Create a new directory with the given name in the specified parent directory"
+ :function (lambda (parent name)
+             (condition-case errdata
+                 (progn
+                   (make-directory (expand-file-name name parent) t)
+                   (format "Directory %s created/verified in %s" name parent))
+               (error (format "Error creating directory %s in %s:\n%S" name parent errdata))))
+ :args (list '( :name "parent"
+                :type "string"
+                :description "The parent directory where the new directory should be created, e.g. /tmp")
+             '( :name "name"
+                :type "string"
+                :description "The name of the new directory to create, e.g. testdir"))
+ :category "filesystem"
+ :confirm t)
 
 ;;;; Writing to files
- (defun gptel--tool-fix-patch-headers ()
-   "Fix line numbers in hunks in diff at point."
-   ;; Find and process each hunk header
-   (while (re-search-forward "^@@ -\\([0-9]+\\),\\([0-9]+\\) +\\+\\([0-9]+\\),\\([0-9]+\\) @@" nil t)
-     (let ((hunk-start (line-beginning-position))
-           (orig-line (string-to-number (match-string 1)))
-           (new-line (string-to-number (match-string 3)))
-           (orig-count 0)
-           (new-count 0))
+(defun gptel-agent--fix-patch-headers ()
+  "Fix line numbers in hunks in diff at point."
+  ;; Find and process each hunk header
+  (while (re-search-forward "^@@ -\\([0-9]+\\),\\([0-9]+\\) +\\+\\([0-9]+\\),\\([0-9]+\\) @@" nil t)
+    (let ((hunk-start (line-beginning-position))
+          (orig-line (string-to-number (match-string 1)))
+          (new-line (string-to-number (match-string 3)))
+          (orig-count 0)
+          (new-count 0))
 
-       ;; Count lines in this hunk until we hit the next @@ or EOF
-       (goto-char hunk-start)
-       (forward-line 1)
-       (save-match-data
-         (while (and (not (eobp))
-                     (not (looking-at-p "^@@")))
-           (cond
-            ;; Removed lines (not ---)
-            ((looking-at-p "^-[^-]")
-             (cl-incf orig-count))
-            ;; Added lines (not +++)
-            ((looking-at-p "^\\+[^+]")
-             (cl-incf new-count))
-            ;; Context lines (space at start)
-            ((looking-at-p "^ ")
-             (cl-incf orig-count)
-             (cl-incf new-count)))
-           (forward-line 1)))
+      ;; Count lines in this hunk until we hit the next @@ or EOF
+      (goto-char hunk-start)
+      (forward-line 1)
+      (save-match-data
+        (while (and (not (eobp))
+                    (not (looking-at-p "^@@")))
+          (cond
+           ;; Removed lines (not ---)
+           ((looking-at-p "^-[^-]")
+            (cl-incf orig-count))
+           ;; Added lines (not +++)
+           ((looking-at-p "^\\+[^+]")
+            (cl-incf new-count))
+           ;; Context lines (space at start)
+           ((looking-at-p "^ ")
+            (cl-incf orig-count)
+            (cl-incf new-count)))
+          (forward-line 1)))
 
-       ;; Replace the hunk header with corrected counts
-       (goto-char hunk-start)
-       (delete-line)
-       (insert (format "@@ -%d,%d +%d,%d @@\n"
-                       orig-line orig-count new-line new-count)))))
+      ;; Replace the hunk header with corrected counts
+      (goto-char hunk-start)
+      (delete-line)
+      (insert (format "@@ -%d,%d +%d,%d @@\n"
+                      orig-line orig-count new-line new-count)))))
 
- (defun gptel--tool-edit-files (path &optional old-str new-str-or-diff diffp)
-   "Replace text in file(s) at PATH using either string matching or unified diff.
+(defun gptel-agent--edit-files (path &optional old-str new-str-or-diff diffp)
+  "Replace text in file(s) at PATH using either string matching or unified diff.
 
 This function supports two distinct modes of operation:
 
@@ -666,41 +586,41 @@ Returns:
 
 Signals:
   error - On any failure condition (caught and displayed by gptel)"
-   (unless (file-readable-p path)
-     (error "Error: File or directory %s is not readable" path))
+  (unless (file-readable-p path)
+    (error "Error: File or directory %s is not readable" path))
 
-   (if (or (eq diffp :json-false) old-str)
-       ;; Replacement by Text
-       (progn
-         (when (file-directory-p path)
-           (error "Error: String replacement is intended for single files, not directories (%s)"
-                  path))
-         (with-temp-buffer
-           (insert-file-contents path)
-           (if (search-forward old-str nil t)
-               (if (save-excursion (search-forward old-str nil t))
-                   (error "Error: Match is not unique.
+  (if (or (eq diffp :json-false) old-str)
+      ;; Replacement by Text
+      (progn
+        (when (file-directory-p path)
+          (error "Error: String replacement is intended for single files, not directories (%s)"
+                 path))
+        (with-temp-buffer
+          (insert-file-contents path)
+          (if (search-forward old-str nil t)
+              (if (save-excursion (search-forward old-str nil t))
+                  (error "Error: Match is not unique.
 Consider providing more context for the replacement, or a unified diff")
-                 ;; TODO: More robust backspace escaping
-                 (replace-match (string-replace  "\\" "\\\\" new-str-or-diff))
-                 (write-region nil nil path)
-                 (format "Successfully replaced %s (truncated) with %s (truncated)"
-                         (truncate-string-to-width old-str 20 nil nil t)
-                         (truncate-string-to-width new-str-or-diff 20 nil nil t)))
-             (error "Error: Could not find old_str \"%s\" in file %s"
-                    (truncate-string-to-width old-str 20) path))))
-     ;; Replacement by Diff
-     (unless (executable-find "patch")
-       (error "Error: Command \"patch\" not available, cannot apply diffs.
+                ;; TODO: More robust backspace escaping
+                (replace-match (string-replace  "\\" "\\\\" new-str-or-diff))
+                (write-region nil nil path)
+                (format "Successfully replaced %s (truncated) with %s (truncated)"
+                        (truncate-string-to-width old-str 20 nil nil t)
+                        (truncate-string-to-width new-str-or-diff 20 nil nil t)))
+            (error "Error: Could not find old_str \"%s\" in file %s"
+                   (truncate-string-to-width old-str 20) path))))
+    ;; Replacement by Diff
+    (unless (executable-find "patch")
+      (error "Error: Command \"patch\" not available, cannot apply diffs.
 Use string replacement instead"))
-     (let* ((out-buf-name (generate-new-buffer-name "*patch-stdout*"))
-            ;; (err-buf-name (generate-new-buffer-name "*patch-stderr*"))
-            (target-file (expand-file-name path))
-            (exit-status -1)             ; Initialize to a known non-zero value
-            (result-output "")
-            ;; (result-error "")
-            )
-       (unwind-protect
+    (let* ((out-buf-name (generate-new-buffer-name "*patch-stdout*"))
+           ;; (err-buf-name (generate-new-buffer-name "*patch-stderr*"))
+           (target-file (expand-file-name path))
+           (exit-status -1)             ; Initialize to a known non-zero value
+           (result-output "")
+           ;; (result-error "")
+           )
+      (unwind-protect
           (let ((default-directory (file-name-directory (expand-file-name path)))
                 (patch-options    '("--forward" "--verbose")))
 
@@ -722,47 +642,33 @@ Use string replacement instead"))
                     (forward-line -1)   ;guaranteed to be at a blank newline
                     (when (looking-at-p "^ *```") (delete-line))))
                 ;; Fix line numbers in hunk headers
-                (gptel--tool-fix-patch-headers)
+                (gptel-agent--fix-patch-headers)
 
-                ;; Pass buffer *names* to call-process-region
                 (setq exit-status
                       (apply #'call-process-region (point-min) (point-max)
                              "patch" nil (list out-buf-name t) ; stdout/stderr buffer names
                              nil patch-options))))
 
             ;; Retrieve content from buffers using their names
-            (let ((stdout-buf (get-buffer out-buf-name))
-                  ;; (stderr-buf (get-buffer err-buf-name))
-                  )
-              (when stdout-buf
+            (when-let* ((stdout-buf (get-buffer out-buf-name)))
+              (when (buffer-live-p stdout-buf)
                 (with-current-buffer stdout-buf
-                  (setq result-output (buffer-string))))
-              ;; (when stderr-buf
-              ;;   (with-current-buffer stderr-buf
-              ;;     (setq result-error (buffer-string))))
-              )
+                  (setq result-output (buffer-string)))))
 
             (if (= exit-status 0)
                 (format "Diff successfully applied to %s.
 Patch command options: %s
 Patch STDOUT:\n%s"
-                        target-file patch-options result-output
-                        ;; result-error
-                        )
+                        target-file patch-options result-output)
               ;; Signal an Elisp error, which gptel will catch and display.
               ;; The arguments to 'error' become the error message.
               (error "Error: Failed to apply diff to %s (exit status %s).
 Patch command options: %s
 Patch STDOUT:\n%s"
                      target-file exit-status patch-options
-                     result-output ;; result-error
-                     )))
-        (let ((stdout-buf-obj (get-buffer out-buf-name)) ;Clean up
-              ;; (stderr-buf-obj (get-buffer err-buf-name))
-              )
-          (when (buffer-live-p stdout-buf-obj) (kill-buffer stdout-buf-obj))
-          ;; (when (buffer-live-p stderr-buf-obj) (kill-buffer stderr-buf-obj))
-          )))))
+                     result-output)))
+        (let ((stdout-buf-obj (get-buffer out-buf-name))) ;Clean up
+          (when (buffer-live-p stdout-buf-obj) (kill-buffer stdout-buf-obj)))))))
 
 (gptel-make-tool
  :name "edit_files"
@@ -772,8 +678,12 @@ Patch STDOUT:\n%s"
 To edit a single file, provide the file `path`.
 
 For the replacement, there are two methods:
-- Short replacements: Provide both `old_str` and `new_str`, in which case `old_str` needs to exactly match one unique section of the original file, including any whitespace.  Make sure to include enough context that the match is not ambiguous.  The entire original string will be replaced with `new str`.
-- Long or involved replacements: set the `diff` parameter to true and provide a unified diff in `new_str`. `old_str` can be ignored.
+- Short replacements: Provide both `old_str` and `new_str`, in which case `old_str` \
+needs to exactly match one unique section of the original file, including any whitespace.  \
+Make sure to include enough context that the match is not ambiguous.  \
+The entire original string will be replaced with `new str`.
+- Long or involved replacements: set the `diff` parameter to true and provide a unified diff \
+in `new_str`. `old_str` can be ignored.
 
 To edit multiple files,
 - provide the directory path,
@@ -783,10 +693,11 @@ To edit multiple files,
 Diff instructions:
 
 - The diff must be provided within fenced code blocks (=diff or =patch) and be in unified format.
-- The LLM should generate the diff such that the file paths within the diff (e.g., '--- a/filename' '+++ b/filename') are appropriate for the 'path'.
+- The LLM should generate the diff such that the file paths within the diff \
+(e.g., '--- a/filename' '+++ b/filename') are appropriate for the 'path'.
 
 To simply insert text at some line, use the \"insert_in_file\" instead."
- :function #'gptel--tool-edit-files
+ :function #'gptel-agent--edit-files
  :args '(( :name "path"
            :description "File path or directory to edit"
            :type string)
@@ -804,7 +715,7 @@ To simply insert text at some line, use the \"insert_in_file\" instead."
  :confirm t
  :include t)
 
-(defun gptel--tool-insert-in-file (path line-number new-str)
+(defun gptel-agent--insert-in-file (path line-number new-str)
   "Insert NEW-STR at LINE-NUMBER in file at PATH.
 
 LINE-NUMBER conventions:
@@ -842,9 +753,9 @@ LINE-NUMBER conventions:
  :name "insert_in_file"
  :description "Insert `new_str` after `line_number` in file at `path`.
 
-Use this tool for purely additive actions: adding text to a file at a
+Use this tool for purely additive actions: adding text to a file at a \
 specific location with no changes to the surrounding context."
- :function #'gptel--tool-insert-in-file
+ :function #'gptel-agent--insert-in-file
  :args '(( :name "path"
            :description "Path of file to edit."
            :type string)
@@ -866,10 +777,12 @@ Overwrites an existing file, so use with care!
 Consider using the more granular tools \"insert_in_file\" or \"edit_files\" first."
  :function (lambda (path filename content)
              (let ((full-path (expand-file-name filename path)))
-               (with-temp-buffer
-                 (insert content)
-                 (write-file full-path))
-               (format "Created file %s in %s" filename path)))
+               (condition-case errdata
+                   (with-temp-buffer
+                     (insert content)
+                     (write-file full-path)
+                     (format "Created file %s in %s" filename path))
+                 (error "Error: Could not write file %s:\n%S" path errdata))))
  :args (list '( :name "path"
                 :type "string"
                 :description "The directory where to create the file, \".\" is the current directory.")
@@ -899,6 +812,8 @@ Consider using the more granular tools \"insert_in_file\" or \"edit_files\" firs
                  (unless (and (file-readable-p path) (file-directory-p path))
                    (error "Error: path %s is not readable" path))
                (setq path "."))
+             (unless (executable-find "tree")
+               (error "Error: Executable `tree` not found.  This tool cannot be used"))
              (with-temp-buffer
                (let* ((args (list "-l" "-f" "-i" "-I" ".git"
                                   "--sort=mtime" "--ignore-case"
@@ -926,7 +841,7 @@ Consider using the more granular tools \"insert_in_file\" or \"edit_files\" firs
  :category "filesystem")
 
 ;;;; Read files or directories
-(defun gptel--tool-read-file-lines (filename start-line end-line)
+(defun gptel-agent--read-file-lines (filename start-line end-line)
   "Return lines START-LINE to END-LINE fom FILENAME."
   (unless (file-readable-p filename)
     (error "Error: File %s is not readable" filename))
@@ -990,7 +905,7 @@ Consider using the \"grep_files\" tool to find the right range to read first.
 Reads the whole file if the line range is not provided.
 
 Files over 512 KB in size can only be read by specifying a line range."
- :function #'gptel--tool-read-file-lines
+ :function #'gptel-agent--read-file-lines
  :args '(( :name "file_path"
            :type string
            :description "The path to the file to be read."
@@ -1007,7 +922,7 @@ Files over 512 KB in size can only be read by specifying a line range."
  :confirm (lambda (_ start end) (or (not start) (not end) (> (- end start) 100)))
  :include t)
 
-(defun gptel--tool-grep (regex path &optional glob context-lines)
+(defun gptel-agent--grep (regex path &optional glob context-lines)
   "Search for REGEX in file or directory at PATH using ripgrep.
 
 REGEX is a PCRE-format regular expression to search for.
@@ -1023,23 +938,32 @@ Returns a string containing matches grouped by file, with line numbers
 and optional context. Results are sorted by modification time."
   (unless (file-readable-p path)
     (error "Error: File or directory %s is not readable" path))
-  (with-temp-buffer
-    (let* ((args
-            (delq nil (list "--sort=modified"
-                            (and (natnump context-lines)
-                                 (format "--context=%d" context-lines))
-                            (and glob (format "--glob=%s" glob))
-                            ;; "--files-with-matches"
-                            ;; "--max-count=10"
-                            "--heading"
-                            "--line-number"
-                            "-e" regex
-                            (expand-file-name (substitute-in-file-name path)))))
-           (exit-code (apply #'call-process "rg" nil '(t t) nil args)))
-      (when (/= exit-code 0)
-        (goto-char (point-min))
-        (insert (format "Error: search failed with exit-code %d.  Tool output:\n\n" exit-code)))
-      (buffer-string))))
+  (let ((grepper (or (executable-find "rg") (executable-find "grep"))))
+    (unless grepper
+      (error "Error: ripgrep/grep not available, this tool cannot be used"))
+    (with-temp-buffer
+      (let* ((args
+              (cond
+               ((string-suffix-p "rg" grepper)
+                (delq nil (list "--sort=modified"
+                                (and (natnump context-lines)
+                                     (format "--context=%d" context-lines))
+                                (and glob (format "--glob=%s" glob))
+                                ;; "--files-with-matches" "--max-count=10"
+                                "--heading" "--line-number" "-e" regex
+                                (expand-file-name (substitute-in-file-name path)))))
+               ((string-suffix-p "grep" grepper)
+                (delq nil (list "--recursive"
+                                (and (natnump context-lines)
+                                     (format "--context=%d" context-lines))
+                                (and glob (format "--include=%s" glob))
+                                "--line-number" "--regexp" regex
+                                (expand-file-name (substitute-in-file-name path)))))))
+             (exit-code (apply #'call-process grepper nil '(t t) nil args)))
+        (when (/= exit-code 0)
+          (goto-char (point-min))
+          (insert (format "Error: search failed with exit-code %d.  Tool output:\n\n" exit-code)))
+        (buffer-string)))))
 
 (gptel-make-tool
  :name "grep_files"
@@ -1050,7 +974,7 @@ Use this tool to find relevant parts of files to read.
 Returns a list of matches prefixed by the line number, and grouped by file.  Can search an individual file (if providing a file path) or a directory.  Consider using this tool to find the right line range for the \"read_file_lines\" tool.
 
 When searching directories, optionally restrict the types of files in the search with a `glob`.  Can request context lines around each match using the `context_lines` parameters."
- :function #'gptel--tool-grep
+ :function #'gptel-agent--grep
  :args '(( :name "regex"
            :description "Regular expression to search for in file contents."
            :type string)
@@ -1072,24 +996,6 @@ Optional, defaults to 0."
  :category "filesystem")
 
 ;;; Task tool (sub-agent)
-(defvar gptel-agents-directories
-  (list (expand-file-name "./agents/"))
-  "Agent descriptions for gptel-agent.")
-
-(defvar gptel--agents nil)
-
-(defun gptel-agents--update ()
-  "Update `gptel--agents' with agent presets."
-  (mapc (lambda (dir)
-          (dolist (agent-file (cl-delete-if-not #'file-regular-p
-                                                (directory-files dir 'full)))
-            (let* ((agent-plist (gptel-agent-parse-frontmatter agent-file))
-                   (name (plist-get agent-plist :name)))
-              (cl-remf agent-plist :name)
-              (setf (alist-get name gptel--agents nil nil 'equal)
-                    agent-plist))))
-        gptel-agents-directories))
-
 (gptel-make-tool
  :name "agent_task"
  :description "Launch a specialized agent to handle complex, multi-step tasks autonomously.  \
@@ -1238,34 +1144,6 @@ Error details: %S"
 
 (provide 'gptel-agent-tools)
 ;;; gptel-agent-tools.el ends here
-
-;; (pcase-dolist (`(,tool ,args ,cb) calls)
-;;   (if (gptel-tool-async tool)
-;;       (apply (gptel-tool-function tool) cb args)
-;;     (let ((result
-;;            (condition-case errdata
-;;                (apply (gptel-tool-function tool) args)
-;;              (error (mapconcat #'gptel--to-string errdata " ")))))
-;;       (funcall cb result))))
-
-;; :backend "ClaudeOauth"
-;; :model 'claude-sonnet-4-5-20250929
-
-;; (mapconcat (lambda (call)
-;;              (propertize (plist-get call :name) 'face 'bold))
-;;            tool-use (propertize "," 'face 'shadow))
-
-;; (with-current-buffer (get-buffer "*scratch*")
-;;   (goto-char (point-max))
-;;   (print (format "\nTool pending at start: %S" (plist-get info :tool-pending))
-;;          (get-buffer "*scratch*"))
-;;   (print (format "Callback called with resp:\n\n%S\n----\n"
-;;                  (if (consp resp) (ignore-errors
-;;                                     (mapcar (lambda (c) (gptel-tool-name (car c)))
-;;                                             resp))
-;;                    resp))
-;;          (get-buffer "*scratch*")))
-
 
 ;; Local Variables:
 ;; elisp-flymake-byte-compile-load-path: ("~/.local/share/git/elpaca/repos/gptel/" "~/.local/share/git/elpaca/repos/transient/lisp" "~/.local/share/git/elpaca/repos/compat/")

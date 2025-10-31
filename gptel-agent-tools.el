@@ -56,50 +56,6 @@
 (defvar url-http-end-of-headers)
 
 ;;; System tools
-(gptel-make-tool
- :name "execute_bash"
- :function (lambda (command)
-             "Execute a bash command and return its output.
-
-COMMAND is the bash command string to execute."
-             (with-temp-buffer
-               (let* ((exit-code (call-process "bash" nil (current-buffer) nil "-c" command))
-                      (output (buffer-string)))
-                 (if (zerop exit-code)
-                     output
-                   (format "Command failed with exit code %d:\nSTDOUT+STDERR:\n%s" exit-code output)))))
- :description "Execute Bash commands.
-
-This tool provides access to a Bash shell with GNU coreutils (or equivalents) available.
-Use this to inspect system state, run builds, tests or other development or system administration tasks.
-
-Do NOT use this for file operations, finding, reading or editing files.
-Use the provided file tools instead: `read_file_lines`, `write_file`, `edit_files`, \
-`glob_files`, `grep_files`
-
-- Quote file paths with spaces using double quotes.
-- Chain dependent commands with && (or ; if failures are OK)
-- Use absolute paths instead of cd when possible
-- For parallel commands, make multiple `execute_bash` calls in one message
-- Run tests, check your work or otherwise close the loop to verify changes you make.
-
-EXAMPLES:
-- List files with details: 'ls -lah /path/to/dir'
-- Find recent errors: 'grep -i error /var/log/app.log | tail -20'
-- Check file type: 'file document.pdf'
-- Count lines: 'wc -l *.txt'
-
-The command will be executed in the current working directory.  Output is
-returned as a string.  Long outputs should be filtered/limited using pipes."
- :args '(( :name "command"
-           :type string
-           :description "The Bash command to execute.  \
-Can include pipes and standard shell operators.
-Example: 'ls -la | head -20' or 'grep -i error app.log | tail -50'"))
- :confirm t
- :include t
- :category "system")
-
 ;; "Execute Bash commands to inspect files and system state.
 
 ;; This tool provides access to a Bash shell with GNU coreutils (or equivalents)
@@ -242,25 +198,6 @@ COUNT is the number of results to return (default 5)."
                     results))))))
     (funcall cb (apply #'concat (nreverse results)))))
 
-(gptel-make-tool
- :name "search_web"
- :function 'gptel-agent--web-search-eww
- :description "Search the web for the first five results to a query.  The query can be an arbitrary string.  Returns the top five results from the search engine as a list of plists.  Each object has the keys `:url` and `:excerpt` for the corresponding search result.
-
-This tool uses the Emacs web browser (eww) with its default search engine (typically DuckDuckGo) to perform searches. No API key is required.
-
-If required, consider using the url as the input to the `read_url` tool to get the contents of the url.  Note that this might not work as the `read_url` tool does not handle javascript-enabled pages."
- :args '((:name "query"
-                :type string
-                :description "The natural language search query, can be multiple words.")
-         (:name "count"
-                :type integer
-                :description "Number of results to return (default 5)"
-                :optional t))
- :include t
- :async t
- :category "web")
-
 ;;;; Read URLs
 (defun gptel-agent--read-url (tool-cb url)
   "Fetch URL text and call TOOL-CB with it."
@@ -281,35 +218,7 @@ If required, consider using the url as the input to the `read_url` tool to get t
                                   errdata)))))
    tool-cb (format "Fetch for \"%s\"" url)))
 
-(gptel-make-tool
- :function #'gptel-agent--read-url
- :name "read_url"
- :description "Fetch and read the contents of a URL.
-
-- Returns the text of the URL (not HTML) formatted for reading.
-- Request times out after 30 seconds."
- :args '(( :name "url"
-           :type "string"
-           :description "The URL to read"))
- :async t
- :include t
- :category "web")
-
 ;;;; Fetch youtube transcript
-(gptel-make-tool
- :name "read_youtube_url"
- :function #'gptel-agent--yt-read-url
- :description "Find the description and video transcript for a youtube video.  Returns a markdown formatted string containing two sections:
-
-\"description\": The video description added by the uploader
-\"transcript\": The video transcript in SRT format"
- :args '((:name "url"
-                :description "The youtube video URL, for example \"https://www.youtube.com/watch?v=H2qJRnV8ZGA\""
-                :type "string"))
- :category "web"
- :async t
- :include t)
-
 (defun gptel-agent--yt-parse-captions (xml-string)
   "Parse YouTube caption XML-STRING and return DOM."
   (with-temp-buffer
@@ -512,36 +421,8 @@ Errors with low severity are not collected."
                       results))))))
       (string-join (nreverse results) "\n\n"))))
 
-(gptel-make-tool
- :name "code_diagnostics"
- :description "Collect all code diagnostics with severity high/medium \
-across all open buffers in the current project."
- :function #'gptel--tool-flymake-diagnostics
- :args nil
- :category "code"
- :include t
- :confirm t)
-
 ;;; Filesystem tools
 ;;;; Make directories
-(gptel-make-tool
- :name "make_directory"
- :description "Create a new directory with the given name in the specified parent directory"
- :function (lambda (parent name)
-             (condition-case errdata
-                 (progn
-                   (make-directory (expand-file-name name parent) t)
-                   (format "Directory %s created/verified in %s" name parent))
-               (error (format "Error creating directory %s in %s:\n%S" name parent errdata))))
- :args (list '( :name "parent"
-                :type "string"
-                :description "The parent directory where the new directory should be created, e.g. /tmp")
-             '( :name "name"
-                :type "string"
-                :description "The name of the new directory to create, e.g. testdir"))
- :category "filesystem"
- :confirm t)
-
 ;;;; Writing to files
 (defun gptel-agent--fix-patch-headers ()
   "Fix line numbers in hunks in diff at point."
@@ -698,51 +579,6 @@ Patch STDOUT:\n%s"
         (let ((stdout-buf-obj (get-buffer out-buf-name))) ;Clean up
           (when (buffer-live-p stdout-buf-obj) (kill-buffer stdout-buf-obj)))))))
 
-(gptel-make-tool
- :name "edit_files"
- :description
- "Replace text in one or more files.
-
-To edit a single file, provide the file `path`.
-
-For the replacement, there are two methods:
-- Short replacements: Provide both `old_str` and `new_str`, in which case `old_str` \
-needs to exactly match one unique section of the original file, including any whitespace.  \
-Make sure to include enough context that the match is not ambiguous.  \
-The entire original string will be replaced with `new str`.
-- Long or involved replacements: set the `diff` parameter to true and provide a unified diff \
-in `new_str`. `old_str` can be ignored.
-
-To edit multiple files,
-- provide the directory path,
-- set the `diff` parameter to true
-- and provide a unified diff in `new_str`.
-
-Diff instructions:
-
-- The diff must be provided within fenced code blocks (=diff or =patch) and be in unified format.
-- The LLM should generate the diff such that the file paths within the diff \
-(e.g., '--- a/filename' '+++ b/filename') are appropriate for the 'path'.
-
-To simply insert text at some line, use the \"insert_in_file\" instead."
- :function #'gptel-agent--edit-files
- :args '(( :name "path"
-           :description "File path or directory to edit"
-           :type string)
-         ( :name "old_str"
-           :description "Original string to replace.  If providing a unified diff, this should be false"
-           :type string
-           :optional t)
-         ( :name "new_str"
-           :description "Replacement string OR unified diff text"
-           :type string)
-         ( :name "diff"
-           :description "Whether the replacement is a string or a diff.  `true` for a diff, `false` otherwise."
-           :type boolean))
- :category "filesystem"
- :confirm t
- :include t)
-
 (defun gptel-agent--insert-in-file (path line-number new-str)
   "Insert NEW-STR at LINE-NUMBER in file at PATH.
 
@@ -776,97 +612,6 @@ LINE-NUMBER conventions:
     (write-region nil nil path)
 
     (format "Successfully inserted text at line %d in %s" line-number path)))
-
-(gptel-make-tool
- :name "insert_in_file"
- :description "Insert `new_str` after `line_number` in file at `path`.
-
-Use this tool for purely additive actions: adding text to a file at a \
-specific location with no changes to the surrounding context."
- :function #'gptel-agent--insert-in-file
- :args '(( :name "path"
-           :description "Path of file to edit."
-           :type string)
-         ( :name "line_number"
-           :description "The line number at which to insert `new_str`, with
-- 0 to insert at the beginning, and
-- -1 to insert at the end."
-           :type integer)
-         ( :name "new_str"
-           :description "String to insert at `line_number`."))
- :category "filesystem"
- :confirm t
- :include t)
-
-(gptel-make-tool
- :name "write_file"
- :description "Create a new file with the specified content.
-Overwrites an existing file, so use with care!
-Consider using the more granular tools \"insert_in_file\" or \"edit_files\" first."
- :function (lambda (path filename content)
-             (let ((full-path (expand-file-name filename path)))
-               (condition-case errdata
-                   (with-temp-buffer
-                     (insert content)
-                     (write-file full-path)
-                     (format "Created file %s in %s" filename path))
-                 (error "Error: Could not write file %s:\n%S" path errdata))))
- :args (list '( :name "path"
-                :type "string"
-                :description "The directory where to create the file, \".\" is the current directory.")
-             '( :name "filename"
-                :type "string"
-                :description "The name of the file to create.")
-             '( :name "content"
-                :type "string"
-                :description "The content to write to the file"))
- :category "filesystem"
- :confirm t)
-
-(gptel-make-tool
- :name "glob_files"
- :description "Recursively find files matching a provided glob pattern.
-
-- Supports glob patterns like \"*.md\" or \"*test*.py\".
-  The glob applies to the basename of the file (with extension).
-- Returns matching file paths at all depths sorted by modification time.
-  Limit the depth of the search by providing the `depth` argument.
-- When you are doing an open ended search that may require multiple rounds
-  of globbing and grepping, use the \"task\" tool instead
-- You can call multiple tools in a single response.  It is always better to
-  speculatively perform multiple searches in parallel if they are potentially useful."
- :function (lambda (pattern &optional path depth)
-             (if path
-                 (unless (and (file-readable-p path) (file-directory-p path))
-                   (error "Error: path %s is not readable" path))
-               (setq path "."))
-             (unless (executable-find "tree")
-               (error "Error: Executable `tree` not found.  This tool cannot be used"))
-             (with-temp-buffer
-               (let* ((args (list "-l" "-f" "-i" "-I" ".git"
-                                  "--sort=mtime" "--ignore-case"
-                                  "--prune" "-P" pattern))
-                      (args (if (natnump depth)
-                                (nconc args '("-L" (number-to-string depth)))
-                              args))
-                      (exit-code (apply #'call-process "tree" nil t nil args)))
-                 (when (/= exit-code 0)
-                   (goto-char (point-min))
-                   (insert (format "glob_files failed with exit code %d\n.STDOUT:\n\n"
-                                   exit-code))))
-               (buffer-string)))
- :args '(( :name "pattern"
-           :type string
-           :description "Glob pattern to match, for example \"*.el\".")
-         ( :name "path"
-           :type string
-           :description "Directory to search in.  Supports relative paths and defaults to \".\""
-           :optional t)
-         ( :name "depth"
-           :description "Limit directory depth of search, 1 or higher. Defaults to no limit."
-           :type integer
-           :optional t))
- :category "filesystem")
 
 ;;;; Read files or directories
 (defun gptel-agent--read-file-lines (filename start-line end-line)
@@ -926,33 +671,6 @@ Please specify a line range to read")
 
         (buffer-string)))))
 
-(gptel-make-tool
- :name "read_file_lines"
- :description "Read file contents between specified line numbers `start_line` and `end_line`,
-with both ends included.
-
-Consider using the \"grep_files\" tool to find the right range to read first.
-
-Reads the whole file if the line range is not provided.
-
-Files over 512 KB in size can only be read by specifying a line range."
- :function #'gptel-agent--read-file-lines
- :args '(( :name "file_path"
-           :type string
-           :description "The path to the file to be read."
-           :type string)
-         ( :name "start_line"
-           :type integer
-           :description "The line to start reading from, defaults to the start of the file"
-           :optional t)
-         ( :name "end_line"
-           :type integer
-           :description "The line up to which to read, defaults to the end of the file."
-           :optional t))
- :category "filesystem"
- :confirm (lambda (_ start end) (or (not start) (not end) (> (- end start) 100)))
- :include t)
-
 (defun gptel-agent--grep (regex path &optional glob context-lines)
   "Search for REGEX in file or directory at PATH using ripgrep.
 
@@ -996,59 +714,7 @@ and optional context. Results are sorted by modification time."
           (insert (format "Error: search failed with exit-code %d.  Tool output:\n\n" exit-code)))
         (buffer-string)))))
 
-(gptel-make-tool
- :name "grep_files"
- :description "Search for text in file(s) at `path`.
-
-Use this tool to find relevant parts of files to read.
-
-Returns a list of matches prefixed by the line number, and grouped by file.  Can search an individual file (if providing a file path) or a directory.  Consider using this tool to find the right line range for the \"read_file_lines\" tool.
-
-When searching directories, optionally restrict the types of files in the search with a `glob`.  Can request context lines around each match using the `context_lines` parameters."
- :function #'gptel-agent--grep
- :args '(( :name "regex"
-           :description "Regular expression to search for in file contents."
-           :type string)
-         ( :name "path"
-           :description "File or directory to search in."
-           :type string)
-         ( :name "glob"
-           :description "Optional glob to restrict file types to search for.
-Only required when path is a directory.
-Examples: *.md, *.rs"
-           :type string
-           :optional t)
-         ( :name "context_lines"
-           :description "Number of lines of context to retrieve around each match (0-15 inclusive).
-Optional, defaults to 0."
-           :optional t
-           :type integer
-           :maximum 15))
- :category "filesystem")
-
 ;;; Task tool (sub-agent)
-(gptel-make-tool
- :name "agent_task"
- :description "Launch a specialized agent to handle complex, multi-step tasks autonomously.  \
-Agents run independently and return results in one message.  \
-Use for open-ended searches, complex research, or when uncertain about finding results in first few tries."
- :function #'gptel-agent--task
- :args '(( :name "subagent_type"
-           :type string
-           :enum ["researcher" "introspector"]
-           :description "The type of specialized agent to use for this task")
-         ( :name "description"
-           :type string
-           :description "A short (3-5 word) description of the task")
-         ( :name "prompt"
-           :type "string"
-           :description "The detailed task for the agent to perform autonomously.  \
-Should include exactly what information the agent should return."))
- :category "agent"
- :async t
- :confirm t
- :include t)
-
 (defvar gptel-agent-request--handlers
   `((WAIT ,#'gptel-agent--indicate-wait
           ,#'gptel--handle-wait)
@@ -1172,6 +838,342 @@ Error details: %S"
                    (setq partial (funcall transformer partial)))
                  (funcall main-cb partial))))))))))
 
+
+;;; All tool declarations
+
+(gptel-make-tool
+ :name "execute_bash"
+ :function (lambda (command)
+             "Execute a bash command and return its output.
+
+COMMAND is the bash command string to execute."
+             (with-temp-buffer
+               (let* ((exit-code (call-process "bash" nil (current-buffer) nil "-c" command))
+                      (output (buffer-string)))
+                 (if (zerop exit-code)
+                     output
+                   (format "Command failed with exit code %d:\nSTDOUT+STDERR:\n%s" exit-code output)))))
+ :description "Execute Bash commands.
+
+This tool provides access to a Bash shell with GNU coreutils (or equivalents) available.
+Use this to inspect system state, run builds, tests or other development or system administration tasks.
+
+Do NOT use this for file operations, finding, reading or editing files.
+Use the provided file tools instead: `read_file_lines`, `write_file`, `edit_files`, \
+`glob_files`, `grep_files`
+
+- Quote file paths with spaces using double quotes.
+- Chain dependent commands with && (or ; if failures are OK)
+- Use absolute paths instead of cd when possible
+- For parallel commands, make multiple `execute_bash` calls in one message
+- Run tests, check your work or otherwise close the loop to verify changes you make.
+
+EXAMPLES:
+- List files with details: 'ls -lah /path/to/dir'
+- Find recent errors: 'grep -i error /var/log/app.log | tail -20'
+- Check file type: 'file document.pdf'
+- Count lines: 'wc -l *.txt'
+
+The command will be executed in the current working directory.  Output is
+returned as a string.  Long outputs should be filtered/limited using pipes."
+ :args '(( :name "command"
+           :type string
+           :description "The Bash command to execute.  \
+Can include pipes and standard shell operators.
+Example: 'ls -la | head -20' or 'grep -i error app.log | tail -50'"))
+ :confirm t
+ :include t
+ :category "gptel-agent")
+
+(gptel-make-tool
+ :name "search_web"
+ :function 'gptel-agent--web-search-eww
+ :description "Search the web for the first five results to a query.  The query can be an arbitrary string.  Returns the top five results from the search engine as a list of plists.  Each object has the keys `:url` and `:excerpt` for the corresponding search result.
+
+This tool uses the Emacs web browser (eww) with its default search engine (typically DuckDuckGo) to perform searches. No API key is required.
+
+If required, consider using the url as the input to the `read_url` tool to get the contents of the url.  Note that this might not work as the `read_url` tool does not handle javascript-enabled pages."
+ :args '((:name "query"
+                :type string
+                :description "The natural language search query, can be multiple words.")
+         (:name "count"
+                :type integer
+                :description "Number of results to return (default 5)"
+                :optional t))
+ :include t
+ :async t
+ :category "gptel-agent")
+
+(gptel-make-tool
+ :function #'gptel-agent--read-url
+ :name "read_url"
+ :description "Fetch and read the contents of a URL.
+
+- Returns the text of the URL (not HTML) formatted for reading.
+- Request times out after 30 seconds."
+ :args '(( :name "url"
+           :type "string"
+           :description "The URL to read"))
+ :async t
+ :include t
+ :category "gptel-agent")
+
+(gptel-make-tool
+ :name "read_youtube_url"
+ :function #'gptel-agent--yt-read-url
+ :description "Find the description and video transcript for a youtube video.  Returns a markdown formatted string containing two sections:
+
+\"description\": The video description added by the uploader
+\"transcript\": The video transcript in SRT format"
+ :args '((:name "url"
+                :description "The youtube video URL, for example \"https://www.youtube.com/watch?v=H2qJRnV8ZGA\""
+                :type "string"))
+ :category "gptel-agent"
+ :async t
+ :include t)
+
+(gptel-make-tool
+ :name "code_diagnostics"
+ :description "Collect all code diagnostics with severity high/medium \
+across all open buffers in the current project."
+ :function #'gptel--tool-flymake-diagnostics
+ :args nil
+ :category "gptel-agent"
+ :include t
+ :confirm t)
+
+(gptel-make-tool
+ :name "make_directory"
+ :description "Create a new directory with the given name in the specified parent directory"
+ :function (lambda (parent name)
+             (condition-case errdata
+                 (progn
+                   (make-directory (expand-file-name name parent) t)
+                   (format "Directory %s created/verified in %s" name parent))
+               (error (format "Error creating directory %s in %s:\n%S" name parent errdata))))
+ :args (list '( :name "parent"
+                :type "string"
+                :description "The parent directory where the new directory should be created, e.g. /tmp")
+             '( :name "name"
+                :type "string"
+                :description "The name of the new directory to create, e.g. testdir"))
+ :category "gptel-agent"
+ :confirm t)
+
+(gptel-make-tool
+ :name "edit_files"
+ :description
+ "Replace text in one or more files.
+
+To edit a single file, provide the file `path`.
+
+For the replacement, there are two methods:
+- Short replacements: Provide both `old_str` and `new_str`, in which case `old_str` \
+needs to exactly match one unique section of the original file, including any whitespace.  \
+Make sure to include enough context that the match is not ambiguous.  \
+The entire original string will be replaced with `new str`.
+- Long or involved replacements: set the `diff` parameter to true and provide a unified diff \
+in `new_str`. `old_str` can be ignored.
+
+To edit multiple files,
+- provide the directory path,
+- set the `diff` parameter to true
+- and provide a unified diff in `new_str`.
+
+Diff instructions:
+
+- The diff must be provided within fenced code blocks (=diff or =patch) and be in unified format.
+- The LLM should generate the diff such that the file paths within the diff \
+  (e.g., '--- a/filename' '+++ b/filename') are appropriate for the 'path'.
+
+To simply insert text at some line, use the \"insert_in_file\" instead."
+ :function #'gptel-agent--edit-files
+ :args '(( :name "path"
+           :description "File path or directory to edit"
+           :type string)
+         ( :name "old_str"
+           :description "Original string to replace.  If providing a unified diff, this should be false"
+           :type string
+           :optional t)
+         ( :name "new_str"
+           :description "Replacement string OR unified diff text"
+           :type string)
+         ( :name "diff"
+           :description "Whether the replacement is a string or a diff.  `true` for a diff, `false` otherwise."
+           :type boolean))
+ :category "gptel-agent"
+ :confirm t
+ :include t)
+
+(gptel-make-tool
+ :name "insert_in_file"
+ :description "Insert `new_str` after `line_number` in file at `path`.
+
+Use this tool for purely additive actions: adding text to a file at a \
+specific location with no changes to the surrounding context."
+ :function #'gptel-agent--insert-in-file
+ :args '(( :name "path"
+           :description "Path of file to edit."
+           :type string)
+         ( :name "line_number"
+           :description "The line number at which to insert `new_str`, with
+- 0 to insert at the beginning, and
+- -1 to insert at the end."
+           :type integer)
+         ( :name "new_str"
+           :description "String to insert at `line_number`."))
+ :category "gptel-agent"
+ :confirm t
+ :include t)
+
+(gptel-make-tool
+ :name "write_file"
+ :description "Create a new file with the specified content.
+Overwrites an existing file, so use with care!
+Consider using the more granular tools \"insert_in_file\" or \"edit_files\" first."
+ :function (lambda (path filename content)
+             (let ((full-path (expand-file-name filename path)))
+               (condition-case errdata
+                   (with-temp-buffer
+                     (insert content)
+                     (write-file full-path)
+                     (format "Created file %s in %s" filename path))
+                 (error "Error: Could not write file %s:\n%S" path errdata))))
+ :args (list '( :name "path"
+                :type "string"
+                :description "The directory where to create the file, \".\" is the current directory.")
+             '( :name "filename"
+                :type "string"
+                :description "The name of the file to create.")
+             '( :name "content"
+                :type "string"
+                :description "The content to write to the file"))
+ :category "gptel-agent"
+ :confirm t)
+
+(gptel-make-tool
+ :name "glob_files"
+ :description "Recursively find files matching a provided glob pattern.
+
+- Supports glob patterns like \"*.md\" or \"*test*.py\".
+  The glob applies to the basename of the file (with extension).
+- Returns matching file paths at all depths sorted by modification time.
+  Limit the depth of the search by providing the `depth` argument.
+- When you are doing an open ended search that may require multiple rounds
+  of globbing and grepping, use the \"task\" tool instead
+- You can call multiple tools in a single response.  It is always better to
+  speculatively perform multiple searches in parallel if they are potentially useful."
+ :function (lambda (pattern &optional path depth)
+             (if path
+                 (unless (and (file-readable-p path) (file-directory-p path))
+                   (error "Error: path %s is not readable" path))
+               (setq path "."))
+             (unless (executable-find "tree")
+               (error "Error: Executable `tree` not found.  This tool cannot be used"))
+             (with-temp-buffer
+               (let* ((args (list "-l" "-f" "-i" "-I" ".git"
+                                  "--sort=mtime" "--ignore-case"
+                                  "--prune" "-P" pattern))
+                      (args (if (natnump depth)
+                                (nconc args '("-L" (number-to-string depth)))
+                              args))
+                      (exit-code (apply #'call-process "tree" nil t nil args)))
+                 (when (/= exit-code 0)
+                   (goto-char (point-min))
+                   (insert (format "glob_files failed with exit code %d\n.STDOUT:\n\n"
+                                   exit-code))))
+               (buffer-string)))
+ :args '(( :name "pattern"
+           :type string
+           :description "Glob pattern to match, for example \"*.el\".")
+         ( :name "path"
+           :type string
+           :description "Directory to search in.  Supports relative paths and defaults to \".\""
+           :optional t)
+         ( :name "depth"
+           :description "Limit directory depth of search, 1 or higher. Defaults to no limit."
+           :type integer
+           :optional t))
+ :category "gptel-agent")
+
+(gptel-make-tool
+ :name "read_file_lines"
+ :description "Read file contents between specified line numbers `start_line` and `end_line`,
+with both ends included.
+
+Consider using the \"grep_files\" tool to find the right range to read first.
+
+Reads the whole file if the line range is not provided.
+
+Files over 512 KB in size can only be read by specifying a line range."
+ :function #'gptel-agent--read-file-lines
+ :args '(( :name "file_path"
+           :type string
+           :description "The path to the file to be read."
+           :type string)
+         ( :name "start_line"
+           :type integer
+           :description "The line to start reading from, defaults to the start of the file"
+           :optional t)
+         ( :name "end_line"
+           :type integer
+           :description "The line up to which to read, defaults to the end of the file."
+           :optional t))
+ :category "gptel-agent"
+ :confirm (lambda (_ start end) (or (not start) (not end) (> (- end start) 100)))
+ :include t)
+
+(gptel-make-tool
+ :name "grep_files"
+ :description "Search for text in file(s) at `path`.
+
+Use this tool to find relevant parts of files to read.
+
+Returns a list of matches prefixed by the line number, and grouped by file.  Can search an individual file (if providing a file path) or a directory.  Consider using this tool to find the right line range for the \"read_file_lines\" tool.
+
+When searching directories, optionally restrict the types of files in the search with a `glob`.  Can request context lines around each match using the `context_lines` parameters."
+ :function #'gptel-agent--grep
+ :args '(( :name "regex"
+           :description "Regular expression to search for in file contents."
+           :type string)
+         ( :name "path"
+           :description "File or directory to search in."
+           :type string)
+         ( :name "glob"
+           :description "Optional glob to restrict file types to search for.
+Only required when path is a directory.
+Examples: *.md, *.rs"
+           :type string
+           :optional t)
+         ( :name "context_lines"
+           :description "Number of lines of context to retrieve around each match (0-15 inclusive).
+Optional, defaults to 0."
+           :optional t
+           :type integer
+           :maximum 15))
+ :category "gptel-agent")
+
+(gptel-make-tool
+ :name "agent_task"
+ :description "Launch a specialized agent to handle complex, multi-step tasks autonomously.  \
+Agents run independently and return results in one message.  \
+Use for open-ended searches, complex research, or when uncertain about finding results in first few tries."
+ :function #'gptel-agent--task
+ :args '(( :name "subagent_type"
+           :type string
+           :enum ["researcher" "introspector"]
+           :description "The type of specialized agent to use for this task")
+         ( :name "description"
+           :type string
+           :description "A short (3-5 word) description of the task")
+         ( :name "prompt"
+           :type "string"
+           :description "The detailed task for the agent to perform autonomously.  \
+Should include exactly what information the agent should return."))
+ :category "gptel-agent"
+ :async t
+ :confirm t
+ :include t)
 
 (provide 'gptel-agent-tools)
 ;;; gptel-agent-tools.el ends here

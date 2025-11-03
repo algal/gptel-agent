@@ -1,6 +1,8 @@
 ---
 name: researcher
-description: Reviews code for bugs and style issues
+description: >
+  Focused on searching, reading and analyzing without modifications.
+  Can reviews code or do online research.
 tools:
   - glob_files
   - grep_files

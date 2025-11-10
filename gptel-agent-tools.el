@@ -68,9 +68,13 @@
     (overlay-put ov 'keymap
                  (make-composed-keymap
                   (define-keymap
+                    "n"     'gptel-agent--next-overlay
+                    "p"     'gptel-agent--previous-overlay
+                    "q"     'gptel--reject-tool-calls
                     "<tab>" 'gptel-agent--cycle-overlay
                     "TAB"   'gptel-agent--cycle-overlay)
                   gptel-tool-call-actions-map))
+    (gptel-agent--cycle-overlay ov)
     ov))
 
 (defun gptel-agent--cycle-overlay (ov)
@@ -89,6 +93,20 @@
           (overlay-put hide-ov 'evaporate t)
           (overlay-put hide-ov 'invisible t)
           (overlay-put hide-ov 'before-string " ▼"))))))
+
+(defun gptel-agent--next-overlay ()
+  (interactive)
+  (when-let* ((ov (cdr (get-char-property-and-overlay
+                        (point) 'gptel-agent-tool)))
+              (end (overlay-end ov)))
+    (when (get-char-property end 'gptel-tool)
+      (goto-char end))))
+
+(defun gptel-agent--previous-overlay ()
+  (interactive)
+  (when-let* ((ov (cdr (get-char-property-and-overlay
+                        (1- (point)) 'gptel-agent-tool))))
+    (goto-char (overlay-start ov))))
 
 ;;; System tools
 ;; "Execute Bash commands to inspect files and system state.

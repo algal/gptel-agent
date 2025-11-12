@@ -187,7 +187,8 @@ Returns a plist with:
 - :system containing the markdown body text after frontmatter (with
   templates expanded)
 
-If no frontmatter block exists, returns nil.
+If no frontmatter block exists, returns a plist with just the :system
+key containing the entire file content.
 
 Signals an error if:
 - The frontmatter block is malformed (opening without closing delimiter)
@@ -201,7 +202,15 @@ Signals an error if:
 
     ;; Check if file starts with frontmatter delimiter
     (if (not (looking-at-p "^---[ \t]*$"))
-        nil                             ; No frontmatter
+        ;; No frontmatter - return plist with :system key containing entire file content
+        (let ((file-content (buffer-string)))
+          (if templates
+              (progn                    ;Apply template substitutions
+                (gptel-agent--expand-templates (point-min) templates)
+                ;; Extract the expanded body text
+                (list :system (buffer-substring-no-properties (point-min) (point-max))))
+            ;; Return plist with system content as-is
+            (list :system file-content)))
 
       ;; Move past opening delimiter
       (forward-line 1)
@@ -270,7 +279,8 @@ Returns a plist with:
 - :system containing the Org file body text after the property
   block (with templates expanded)
 
-If no property block exists, returns nil.
+If no property block exists, returns a plist with just the :system
+key containing the entire file content.
 
 Signals an error if:
 - A key in the property block is not allowed by the validator"
@@ -285,7 +295,15 @@ Signals an error if:
     ;; Try to get the property block at this position
     (let ((prop-range (org-get-property-block)))
       (if (not prop-range)
-          nil                           ; No property block found
+          ;; No property block - return plist with :system key containing entire file content
+          (let ((file-content (buffer-string)))
+            (if templates
+                (progn                  ;Apply template substitutions
+                  (gptel-agent--expand-templates (point-min) templates)
+                  ;; Extract the expanded body text
+                  (list :system (buffer-substring-no-properties (point-min) (point-max))))
+              ;; Return plist with system content as-is
+              (list :system file-content)))
 
         ;; Extract properties as an alist
         (let* ((props-alist (org-entry-properties (point-min) 'standard))

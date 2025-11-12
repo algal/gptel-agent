@@ -92,6 +92,7 @@ If NO-HIDE is non-nil, don't hide the overlay body by default."
           (overlay-put hide-ov 'before-string " ▼"))))))
 
 (defun gptel-agent--next-overlay ()
+  "Jump to the next `gptel-agent' tool overlay."
   (interactive)
   (when-let* ((ov (cdr (get-char-property-and-overlay
                         (point) 'gptel-agent-tool)))
@@ -100,6 +101,7 @@ If NO-HIDE is non-nil, don't hide the overlay body by default."
       (goto-char end))))
 
 (defun gptel-agent--previous-overlay ()
+  "Jump to the previous `gptel-agent' tool overlay."
   (interactive)
   (when-let* ((ov (cdr (get-char-property-and-overlay
                         (1- (point)) 'gptel-agent-tool))))
@@ -182,6 +184,9 @@ properties persist through refontification."
 ;; - Default timeout is 2 minutes (120000ms), max is 10 minutes
 
 (defun gptel-agent--eval-elisp-preview-setup (arg-values _info)
+  "Setup preview overlay for Elisp evaluation tool call.
+
+ARG-VALUES is the list of arguments for the tool call."
   (let ((expr (car arg-values))
         (from (point)) (inner-from))
     (insert
@@ -197,6 +202,9 @@ properties persist through refontification."
     (gptel-agent--confirm-overlay from (point) t)))
 
 (defun gptel-agent--execute-bash-preview-setup (arg-values _info)
+  "Setup preview overlay for Bash command execution tool call.
+
+ARG-VALUES is the list of arguments for the tool call."
   (let ((command (car arg-values))
         (from (point)) (inner-from))
     (insert
@@ -516,10 +524,11 @@ description and transcript formatted as timestamped paragraphs."
 (declare-function flymake--diag-text "flymake")
 (declare-function flymake-diagnostic-buffer "flymake")
 
-(defun gptel--tool-flymake-diagnostics ()
-  "Collect all flymake errors across all open buffers in the current project.
+(defun gptel--tool-flymake-diagnostics (&optional all)
+  "Collect flymake errors across all open buffers in the current project.
 
-Errors with low severity are not collected."
+Errors with low severity are not collected.  With ALL, collect all
+diagnostics."
   (let ((project (project-current)))
     (unless project
       (error "Not in a project.  Cannot collect flymake diagnostics"))
@@ -527,7 +536,7 @@ Errors with low severity are not collected."
     (let ((results '()))
       (dolist (diag (flymake--project-diagnostics project))
         (let ((severity (flymake--diag-type diag)))
-          (when (memq severity '(:error :warning))
+          (when (memq severity `(:error :warning ,@(and all '(:note))))
             (with-current-buffer (flymake-diagnostic-buffer diag)
               (let* ((beg (flymake--diag-beg diag))
                      (line-num (line-number-at-pos beg))
@@ -673,7 +682,7 @@ Signals:
           (insert-file-contents path)
           (if (search-forward old-str nil t)
               (if (save-excursion (search-forward old-str nil t))
-                  (error "Error: Match is not unique.
+                  (error "Error: Match is not unique.\
 Consider providing more context for the replacement, or a unified diff")
                 ;; TODO: More robust backspace escaping
                 (replace-match (string-replace  "\\" "\\\\" new-str-or-diff))
@@ -685,7 +694,7 @@ Consider providing more context for the replacement, or a unified diff")
                    (truncate-string-to-width old-str 20) path))))
     ;; Replacement by Diff
     (unless (executable-find "patch")
-      (error "Error: Command \"patch\" not available, cannot apply diffs.
+      (error "Error: Command \"patch\" not available, cannot apply diffs.\
 Use string replacement instead"))
     (let* ((out-buf-name (generate-new-buffer-name "*patch-stdout*"))
            ;; (err-buf-name (generate-new-buffer-name "*patch-stderr*"))
@@ -821,6 +830,9 @@ LINE-NUMBER conventions:
     (format "Successfully inserted text at line %d in %s" line-number path)))
 
 (defun gptel-agent--write-file-preview-setup (arg-values _info)
+  "Setup preview overlay for Write file tool call.
+
+ARG-VALUES is the list of arguments for the tool call."
   (pcase-let ((from (point))
               (`(,path ,filename ,content) arg-values))
     (insert
@@ -851,7 +863,7 @@ LINE-NUMBER conventions:
   (if (and (not start-line) (not end-line)) ;read full file
       (if (> (file-attribute-size (file-attributes filename))
              (* 512 1024))
-          (error "Error: File is too large (> 512 KB).
+          (error "Error: File is too large (> 512 KB).\
 Please specify a line range to read")
         (with-temp-buffer
           (insert-file-contents filename)
@@ -1056,6 +1068,7 @@ ARG-VALUES is a list: (type description prompt)"
     (gptel-agent--confirm-overlay from (point) t)))
 
 (defun gptel-agent--indicate-wait (fsm)
+  "Display waiting indicator for agent task FSM."
   (when-let* ((info (gptel-fsm-info fsm))
               (info-ov (plist-get info :context))
               (count (overlay-get info-ov 'count)))
@@ -1075,6 +1088,7 @@ ARG-VALUES is a list: (type description prompt)"
      info-ov count)))
 
 (defun gptel-agent--indicate-tool-call (fsm)
+  "Display tool call indicator for agent task FSM."
   (when-let* ((info (gptel-fsm-info fsm))
               (tool-use (plist-get info :tool-use))
               (ov (plist-get info :context)))
@@ -1098,6 +1112,7 @@ ARG-VALUES is a list: (type description prompt)"
         (overlay-put ov 'after-string new-info-msg)))))
 
 (defun gptel-agent--task-overlay (where &optional agent-type description)
+  "Create overlay for agent task at WHERE with AGENT-TYPE and DESCRIPTION."
   (let* ((bounds                  ;where to place the overlay, handle edge cases
           (save-excursion
             (goto-char where)
@@ -1150,7 +1165,7 @@ PROMPT is the detailed prompt instructing the agent on what is required."
               ('nil
                (delete-overlay ov)
                (funcall main-cb
-                        (format "Error: Task %s could not finish task \"%s\".
+                        (format "Error: Task %s could not finish task \"%s\". \
 
 Error details: %S"
                                 agent-type description (plist-get info :error))))
@@ -1170,7 +1185,7 @@ Error details: %S"
               ('abort
                (delete-overlay ov)
                (funcall main-cb
-                        (format "Error: Task \"%s\" was aborted by the user.
+                        (format "Error: Task \"%s\" was aborted by the user. \
 %s could not finish."
                                 description agent-type))))))))))
 
@@ -1335,9 +1350,16 @@ If required, consider using the url as the input to the `Read` tool to get the c
 (gptel-make-tool
  :name "Diagnostics"
  :description "Collect all code diagnostics with severity high/medium \
-across all open buffers in the current project."
+across all open buffers in the current project.
+
+With optional argument `all`, collect notes and low-severity diagnostics
+too."
  :function #'gptel--tool-flymake-diagnostics
- :args nil
+ :args (list '( :name "all"
+                :type boolean
+                :description
+                "Whether low-severity diagnostics (notes) should also be collected."
+                :optional t))
  :category "gptel-agent"
  :include t
  :confirm t)
@@ -1434,7 +1456,7 @@ Overwrites an existing file, so use with care!
 Consider using the more granular tools \"Insert\" or \"Edit\" first."
  :function (lambda (path filename content)
              (unless (and (stringp path) (stringp filename) (stringp content))
-               (error "PATH, FILENAME or CONTENT is not a string, cancelling action."))
+               (error "PATH, FILENAME or CONTENT is not a string, cancelling action"))
              (let ((full-path (expand-file-name filename path)))
                (condition-case errdata
                    (with-temp-buffer
